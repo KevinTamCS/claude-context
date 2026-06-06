@@ -96,26 +96,7 @@ Index a codebase directory to enable semantic search using a configurable code s
 `;
 
 
-        const search_description = `
-Search the indexed codebase using natural language queries within a specified absolute path.
-
-⚠️ **IMPORTANT**:
-- You MUST provide an absolute path.
-
-🎯 **When to Use**:
-This tool is versatile and can be used before completing various tasks to retrieve relevant context:
-- **Code search**: Find specific functions, classes, or implementations
-- **Context-aware assistance**: Gather relevant code context before making changes
-- **Issue identification**: Locate problematic code sections or bugs
-- **Code review**: Understand existing implementations and patterns
-- **Refactoring**: Find all related code pieces that need to be updated
-- **Feature development**: Understand existing architecture and similar implementations
-- **Duplicate detection**: Identify redundant or duplicated code patterns across the codebase
-
-✨ **Usage Guidance**:
-- If the codebase is not indexed, this tool will return a clear error message indicating that indexing is required first.
-- You can then use the index_codebase tool to index the codebase before searching again.
-`;
+        const search_description = `Semantically search the codebase and/or documentation using natural language queries within a specified absolute path.`;
 
         // Define available tools
         this.server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -195,6 +176,29 @@ This tool is versatile and can be used before completing various tasks to retrie
                         }
                     },
                     {
+                        name: "search",
+                        description: search_description,
+                        inputSchema: {
+                            type: "object",
+                            properties: {
+                                path: {
+                                    type: "string",
+                                    description: `ABSOLUTE path to the directory to search in.`
+                                },
+                                query: {
+                                    type: "string",
+                                    description: "Natural language query to search for"
+                                },
+                                scope: {
+                                    type: "string",
+                                    description: "The search scope, one of 'codebase', 'documentation', or 'all'",
+                                    enum: ["codebase", "documentation", "all"],
+                                }
+                            },
+                            required: ["path", "query", "scope"]
+                        }
+                    },
+                    {
                         name: "clear_index",
                         description: `Clear the search index. IMPORTANT: You MUST provide an absolute path.`,
                         inputSchema: {
@@ -234,7 +238,9 @@ This tool is versatile and can be used before completing various tasks to retrie
                 case "index_codebase":
                     return await this.toolHandlers.handleIndexCodebase(args);
                 case "search_code":
-                    return await this.toolHandlers.handleSearchCode(args);
+                    return await this.toolHandlers.handleSearchCode(args) as any;
+                case "search":
+                    return await this.toolHandlers.handleSmartSearch(args);
                 case "clear_index":
                     return await this.toolHandlers.handleClearIndex(args);
                 case "get_indexing_status":

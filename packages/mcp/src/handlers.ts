@@ -1,13 +1,16 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
-import { Context, COLLECTION_LIMIT_MESSAGE, FileSynchronizer, IndexAbortError } from "@zilliz/claude-context-core";
+import { Context, COLLECTION_LIMIT_MESSAGE, FileSynchronizer, IndexAbortError, envManager, SemanticSearchResult } from "@zilliz/claude-context-core";
 import { SnapshotManager } from "./snapshot.js";
 import type { CodebaseIndexOptions, RequestSplitterType } from "./config.js";
 import { createRequestSplitter, isRequestSplitterType } from "./splitter.js";
-import { ensureAbsolutePath, truncateContent, trackCodebasePath } from "./utils.js";
+import { ensureAbsolutePath, truncateContent, trackCodebasePath, shuffle, generateLineNumbers } from "./utils.js";
+import { GoogleGenAI, ThinkingLevel } from "@google/genai";
+import { config } from "process";
 
 export class ToolHandlers {
+    private geminiClient: GoogleGenAI;
     private context: Context;
     private snapshotManager: SnapshotManager;
     private indexingStats: { indexedFiles: number; totalChunks: number } | null = null;
@@ -25,6 +28,10 @@ export class ToolHandlers {
         this.context = context;
         this.snapshotManager = snapshotManager;
         this.currentWorkspace = process.cwd();
+
+        if (envManager.get("ENABLE_RERANK") && envManager.get("GEMINI_API_KEY")) {   
+            this.geminiClient = new GoogleGenAI({ apiKey: envManager.get("GEMINI_API_KEY") });
+        }
         console.log(`[WORKSPACE] Current workspace: ${this.currentWorkspace}`);
     }
 
@@ -644,7 +651,7 @@ export class ToolHandlers {
         }
     }
 
-    public async handleSearchCode(args: any) {
+    public async handleSearchCode(args: any, rawResults = false) {
         const { path: codebasePath, query, limit = 10, extensionFilter } = args;
         const resultLimit = limit || 10;
 
@@ -797,6 +804,19 @@ export class ToolHandlers {
                 };
             }
 
+            if (rawResults) {
+                if (isIndexing) {
+                    return {
+                        content: [{
+                            type: "text",
+                            text: `\n\n💡 **Tip**: This codebase is still being indexed. More results may become available as indexing progresses.`
+                        }]
+                    }
+                }
+
+                return searchResults;
+            }
+
             // Format results
             const formattedResults = searchResults.map((result: any, index: number) => {
                 const location = `${result.relativePath}:${result.startLine}-${result.endLine}`;
@@ -849,6 +869,57 @@ export class ToolHandlers {
                 isError: true
             };
         }
+    }
+
+    public async handleSmartSearch(args: any) {
+        if (args.scope === 'documentation') {
+            args.extensionFilter = ['.md'];
+        };
+        
+        if (this.geminiClient === undefined) {
+            args.limit = 10;
+            console.warn(`[SMART-SEARCH] Reranking is disabled. Running standard search without reranking/filtering.`);
+            return await this.handleSearchCode(args);
+        }
+        
+        // 1. Get standard results
+        args.limit = 25;
+        const rawResults = await this.handleSearchCode(args, true);
+
+        // Check if indexing
+        if (Array.isArray(rawResults) && rawResults.length === 1 && typeof rawResults[0].content === 'string' && rawResults[0].content.includes('This codebase is still being indexed')) { 
+            return rawResults;
+        }
+
+        // 2. Shuffle and format results for reranking
+        const formattedResults = (rawResults as SemanticSearchResult[]).map((result: any) => {
+            const location = `${result.relativePath}#L${result.startLine}-${result.endLine}`;
+            const context = truncateContent(generateLineNumbers(result.content, result.startLine), 5000);
+            return `<result path="${location}">\n` + '```' + result.language + `\n${context}\n` + '```\n</result>';
+        });
+        shuffle(formattedResults);
+        const formattedResultsStr = `<results>\n${formattedResults.join('\n')}\n</results>`;
+        
+        // 3. Send to LLM
+        const systemPrompt = await fs.promises.readFile("/home/node/claude-context/rerank.md", "utf-8");
+        const userPrompt = `<query>${args.query}</query>\n<scope>${args.scope}</scope>\n${formattedResultsStr}`;
+        console.log('Sending results for reranking/filtering:', userPrompt);
+        const response = await this.geminiClient.models.generateContent({
+            model: envManager.get("GEMINI_RERANK_MODEL") || "gemma-4-31b-it",
+            contents: userPrompt,
+            config: {
+                systemInstruction: systemPrompt,
+                thinkingConfig: {
+                    thinkingLevel: ThinkingLevel.HIGH,
+                }
+            }
+        });
+
+        console.log('Reranking/filtering response:', response.text);
+        return [{
+            type: "text",
+            text: response.text
+        }];
     }
 
     public async handleClearIndex(args: any) {

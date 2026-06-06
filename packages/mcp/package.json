@@ -19,8 +19,9 @@
         "prepublishOnly": "pnpm build"
     },
     "dependencies": {
-        "@zilliz/claude-context-core": "workspace:*",
+        "@google/genai": "2.8.0",
         "@modelcontextprotocol/sdk": "^1.12.1",
+        "@zilliz/claude-context-core": "workspace:*",
         "zod": "^3.25.55"
     },
     "devDependencies": {
