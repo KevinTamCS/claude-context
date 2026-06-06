@@ -10,7 +10,7 @@ import { GoogleGenAI, ThinkingLevel } from "@google/genai";
 import { config } from "process";
 
 export class ToolHandlers {
-    private geminiClient: GoogleGenAI;
+    private geminiClient: GoogleGenAI | undefined;
     private context: Context;
     private snapshotManager: SnapshotManager;
     private indexingStats: { indexedFiles: number; totalChunks: number } | null = null;
@@ -874,7 +874,7 @@ export class ToolHandlers {
     public async handleSmartSearch(args: any) {
         if (args.scope === 'documentation') {
             args.extensionFilter = ['.md'];
-        };
+        }
         
         if (this.geminiClient === undefined) {
             args.limit = 10;
@@ -882,44 +882,57 @@ export class ToolHandlers {
             return await this.handleSearchCode(args);
         }
         
-        // 1. Get standard results
-        args.limit = 25;
-        const rawResults = await this.handleSearchCode(args, true);
+        try {
+            // 1. Get standard results
+            args.limit = 25;
+            const rawResults = await this.handleSearchCode(args, true);
 
-        // Check if indexing
-        if (Array.isArray(rawResults) && rawResults.length === 1 && typeof rawResults[0].content === 'string' && rawResults[0].content.includes('This codebase is still being indexed')) { 
-            return rawResults;
-        }
-
-        // 2. Shuffle and format results for reranking
-        const formattedResults = (rawResults as SemanticSearchResult[]).map((result: any) => {
-            const location = `${result.relativePath}#L${result.startLine}-${result.endLine}`;
-            const context = truncateContent(generateLineNumbers(result.content, result.startLine), 5000);
-            return `<result path="${location}">\n` + '```' + result.language + `\n${context}\n` + '```\n</result>';
-        });
-        shuffle(formattedResults);
-        const formattedResultsStr = `<results>\n${formattedResults.join('\n')}\n</results>`;
-        
-        // 3. Send to LLM
-        const systemPrompt = await fs.promises.readFile("/home/node/claude-context/rerank.md", "utf-8");
-        const userPrompt = `<query>${args.query}</query>\n<scope>${args.scope}</scope>\n${formattedResultsStr}`;
-        console.log('Sending results for reranking/filtering:', userPrompt);
-        const response = await this.geminiClient.models.generateContent({
-            model: envManager.get("GEMINI_RERANK_MODEL") || "gemma-4-31b-it",
-            contents: userPrompt,
-            config: {
-                systemInstruction: systemPrompt,
-                thinkingConfig: {
-                    thinkingLevel: ThinkingLevel.HIGH,
-                }
+            // If rawResults is not an array, it's an MCP response object (e.g. error message, indexing tip, or empty result).
+            if (!Array.isArray(rawResults)) {
+                return rawResults;
             }
-        });
 
-        console.log('Reranking/filtering response:', response.text);
-        return [{
-            type: "text",
-            text: response.text
-        }];
+            // 2. Shuffle and format results for reranking
+            const formattedResults = (rawResults as SemanticSearchResult[]).map((result: any) => {
+                const location = `${result.relativePath}#L${result.startLine}-${result.endLine}`;
+                const context = truncateContent(generateLineNumbers(result.content, result.startLine), 5000);
+                return `<result path="${location}">\n` + '```' + result.language + `\n${context}\n` + '```\n</result>';
+            });
+            shuffle(formattedResults);
+            const formattedResultsStr = `<results>\n${formattedResults.join('\n')}\n</results>`;
+            
+            // 3. Send to LLM
+            const systemPrompt = await fs.promises.readFile("/home/node/claude-context/rerank.md", "utf-8");
+            const userPrompt = `<query>${args.query}</query>\n<scope>${args.scope}</scope>\n${formattedResultsStr}`;
+            console.log('Sending results for reranking/filtering:', userPrompt);
+            const response = await this.geminiClient.models.generateContent({
+                model: envManager.get("GEMINI_RERANK_MODEL") || "gemma-4-31b-it",
+                contents: userPrompt,
+                config: {
+                    systemInstruction: systemPrompt,
+                    thinkingConfig: {
+                        thinkingLevel: ThinkingLevel.HIGH,
+                    }
+                }
+            });
+
+            console.log('Reranking/filtering response:', response.text);
+            return {
+                content: [{
+                    type: "text",
+                    text: response.text
+                }]
+            };
+        } catch (error: any) {
+            console.error('Error in handleSmartSearch:', error);
+            return {
+                content: [{
+                    type: "text",
+                    text: `Error performing smart search: ${error.message || error}`
+                }],
+                isError: true
+            };
+        }
     }
 
     public async handleClearIndex(args: any) {
